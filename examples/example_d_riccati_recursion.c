@@ -59,7 +59,15 @@
 
 
 
-//#define PRINT_DATA
+#define PRINT_DATA
+
+// comment from Yang Shaohui
+// One shall follow Gianluca Frison's paper
+// "Efficient Implementation of the Riccati Recursion for Solving Linear-Quadratic Control Problem"
+
+// factorization: Algorithm 3 in the paper, where Cholesky decomposition result is stored
+// backward substitution: line 1-5 in Algorithm 2
+// forward substitution: line 6-11 in Algorithm 2
 
 
 
@@ -118,7 +126,20 @@ static void d_back_ric_sv_libstr(int N, int *nx, int *nu, struct blasfeo_dmat *h
 
 	}
 
-
+/*
+	N: horizon length
+	nx[i]: number of states in stage i
+	nu[i]: number of inputs in stage i
+	hsBAbt[i]: [B_i A_i b_i]', (nu + nx + 1) * (nx)
+	hsRSQrq[i]: [R_i
+				 S_i' Q_i
+				 r_i' q_i'], (nu + nx + 1) * (nu + nx)
+	hsRSQrq[N]: [Q_N
+				 q_N'], (nx + 1) * nx
+	hsL[i]: [\Sigma_i
+			 L_i'      \mathcal{L}_i], (nu + nx) * (nu + nx)
+	hswork_mat[0]: a temporary variable
+*/
 
 static void d_back_ric_trf_libstr(int N, int *nx, int *nu, struct blasfeo_dmat *hsBAbt, struct blasfeo_dmat *hsRSQrq, struct blasfeo_dmat *hsL, struct blasfeo_dmat *hswork_mat)
 	{
@@ -127,15 +148,26 @@ static void d_back_ric_trf_libstr(int N, int *nx, int *nu, struct blasfeo_dmat *
 
 	// factorization
 
-	// last stage
+	// last stage, nu[N] = 0
 	blasfeo_dpotrf_l(nx[N], &hsRSQrq[N], 0, 0, &hsL[N], 0, 0);
 
 	// middle stages
 	for(nn=0; nn<N; nn++)
 		{
+		// i = N - nn - 1 ; i + 1 = N - nn
+		// line 3 of Algorithm 3
 		blasfeo_dtrmm_rlnn(nu[N-nn-1]+nx[N-nn-1], nx[N-nn], 1.0, &hsL[N-nn], nu[N-nn], nu[N-nn], &hsBAbt[N-nn-1], 0, 0, &hswork_mat[0], 0, 0);
+		// hswork_mat[0] = [B_i'*\mathcal{L}_{i+1}
+		//					A_i'*\mathcal{L}_{i+1}]
 #if 1
+		// line 4 & 5 of Algorithm 3
+		// hswork_mat[0] * hswork_mat[0] = [B_i'*\mathcal{L}_{i+1}*\mathcal{L}_{i+1}'*B_i
+		//									A_i'*\mathcal{L}_{i+1}*\mathcal{L}_{i+1}'*B_i  A_i'*\mathcal{L}_{i+1}*\mathcal{L}_{i+1}'*A_i ]
+		// hswork_mat[0] * hswork_mat[0] + hsRSQrq[i] = [R_i + B_i'P_{i+1}B_i
+		//												 S_i' + A_i'P_{i+1}B_i  Q_i + A_i'P_{i+1}A_i]
 		blasfeo_dsyrk_dpotrf_ln(nu[N-nn-1]+nx[N-nn-1], nx[N-nn], &hswork_mat[0], 0, 0, &hswork_mat[0], 0, 0, &hsRSQrq[N-nn-1], 0, 0, &hsL[N-nn-1], 0, 0);
+		// hsL[i] = [\Sigma_i
+		//		 	 L_i'      \mathcal{L}_i]
 #else
 		blasfeo_dsyrk_ln(nu[N-nn-1]+nx[N-nn-1], nu[N-nn-1]+nx[N-nn-1], nx[N-nn], 1.0, &hswork_mat[0], 0, 0, &hswork_mat[0], 0, 0, 1.0, &hsRSQrq[N-nn-1], 0, 0, &hsL[N-nn-1], 0, 0);
 		blasfeo_dpotrf_l(nu[N-nn-1]+nx[N-nn-1], nu[N-nn-1]+nx[N-nn-1], &hsL[N-nn-1], 0, 0, &hsL[N-nn-1], 0, 0);
@@ -222,52 +254,131 @@ static void d_back_ric_trs_libstr(int N, int *nx, int *nu, struct blasfeo_dmat *
 	// middle stages
 	for(nn=0; nn<N-1; nn++)
 		{
+		// line 3 & 4 in Algorithm 2
+		// i + 1 = N - nn
+		// i     = N - nn - 1
+
 		// compute Pb
 		blasfeo_dtrmv_ltn(nx[N-nn], nx[N-nn], &hsL[N-nn], nu[N-nn], nu[N-nn], &hsb[N-nn-1], 0, &hsPb[N-nn-1], 0);
 		blasfeo_dtrmv_lnn(nx[N-nn], nx[N-nn], &hsL[N-nn], nu[N-nn], nu[N-nn], &hsPb[N-nn-1], 0, &hsPb[N-nn-1], 0);
+		// hsPb[i] = P_{i+1}b_i
+
 		blasfeo_dveccp(nu[N-nn-1]+nx[N-nn-1], &hsrq[N-nn-1], 0, &hsux[N-nn-1], 0);
+		// hsux[i] = [ri
+		//			  qi]
+
 		blasfeo_dveccp(nx[N-nn], &hsPb[N-nn-1], 0, &hswork_vec[0], 0);
+		// hswork_vec[0] = P_{i+1}b_i
+
 		blasfeo_daxpy(nx[N-nn], 1.0, &hsux[N-nn], nu[N-nn], &hswork_vec[0], 0, &hswork_vec[0], 0);
+		// hsux[i+1] = [l_{i+1}
+		//				p_{i+1} ] from previous iteration
+		// hswork_vec[0] = P_{i+1}b_i + p_{i+1}
+
 		blasfeo_dgemv_n(nu[N-nn-1]+nx[N-nn-1], nx[N-nn], 1.0, &hsBAbt[N-nn-1], 0, 0, &hswork_vec[0], 0, 1.0, &hsux[N-nn-1], 0, &hsux[N-nn-1], 0);
+		// hsux[i] = [ri + B_i'(P_{i+1}b_i + p_{i+1})
+		//			  qi + A_i'(P_{i+1}b_i + p_{i+1})]
+
 		blasfeo_dtrsv_lnn_mn(nu[N-nn-1]+nx[N-nn-1], nu[N-nn-1], &hsL[N-nn-1], 0, 0, &hsux[N-nn-1], 0, &hsux[N-nn-1], 0);
+		// hsL[i] = [\Sigma_i
+		//		 	 L_i'      \mathcal{L}_i] but here we abandon the \mathcal{L}_i part
+		// The inversion is [\Sigma_i  0
+		//		 	 		 L_i'      I]^{-1}
+		// 				   =[\Sigma_i^{-1}  	 0
+		// 					 -L_i'*\Sigma_i^{-1} I]
+		// hsux[i] = [l_i = \Sigma_i^{-1} (ri + B_i'(P_{i+1}b_i + p_{i+1}))
+		//			  p_i = qi + A_i'(P_{i+1}b_i + p_{i+1}) - L_i'*l_i]
 		}
 
 	// first stage
-	nn = N-1;
+	nn = N-1; // N - nn = 1, N - nn -1 = 0, nx[0] = 0
 	blasfeo_dtrmv_ltn(nx[N-nn], nx[N-nn], &hsL[N-nn], nu[N-nn], nu[N-nn], &hsb[N-nn-1], 0, &hsPb[N-nn-1], 0);
 	blasfeo_dtrmv_lnn(nx[N-nn], nx[N-nn], &hsL[N-nn], nu[N-nn], nu[N-nn], &hsPb[N-nn-1], 0, &hsPb[N-nn-1], 0);
-	blasfeo_dveccp(nu[N-nn-1]+nx[N-nn-1], &hsrq[N-nn-1], 0, &hsux[N-nn-1], 0);
-	blasfeo_dveccp(nx[N-nn], &hsPb[N-nn-1], 0, &hswork_vec[0], 0);
-	blasfeo_daxpy(nx[N-nn], 1.0, &hsux[N-nn], nu[N-nn], &hswork_vec[0], 0, &hswork_vec[0], 0);
-	blasfeo_dgemv_n(nu[N-nn-1]+nx[N-nn-1], nx[N-nn], 1.0, &hsBAbt[N-nn-1], 0, 0, &hswork_vec[0], 0, 1.0, &hsux[N-nn-1], 0, &hsux[N-nn-1], 0);
-	blasfeo_dtrsv_lnn(nu[N-nn-1]+nx[N-nn-1], &hsL[N-nn-1], 0, 0, &hsux[N-nn-1], 0, &hsux[N-nn-1], 0);
+	// hsPb[0] = P_{1}b_0
 
+	blasfeo_dveccp(nu[N-nn-1]+nx[N-nn-1], &hsrq[N-nn-1], 0, &hsux[N-nn-1], 0);
+	// hsux[0] = [r0]
+
+	blasfeo_dveccp(nx[N-nn], &hsPb[N-nn-1], 0, &hswork_vec[0], 0);
+	// hswork_vec[0] = P_{1}b_0
+
+	blasfeo_daxpy(nx[N-nn], 1.0, &hsux[N-nn], nu[N-nn], &hswork_vec[0], 0, &hswork_vec[0], 0);
+	// hsux[1] = [l_{1}
+	//			  p_{1} ] from previous iteration
+	// hswork_vec[0] = P_{1}b_0 + p_{1}
+
+	blasfeo_dgemv_n(nu[N-nn-1]+nx[N-nn-1], nx[N-nn], 1.0, &hsBAbt[N-nn-1], 0, 0, &hswork_vec[0], 0, 1.0, &hsux[N-nn-1], 0, &hsux[N-nn-1], 0);
+	// hsux[0] = [r0 + B0'(P_{1}b_0 + p_{1})]
+
+	blasfeo_dtrsv_lnn(nu[N-nn-1]+nx[N-nn-1], &hsL[N-nn-1], 0, 0, &hsux[N-nn-1], 0, &hsux[N-nn-1], 0);
+	// hsux[0] = [ l_0 = \Sigma_0^{-1} (r0 + B_0'(P_{1}b_0 + p_{1})) ]
 
 	// forward substitution
 
 	// first stage
+	// since the 0 stage dynamics has been absorbed into \tilde{b}0, there is no p0, L0, \mathcal{L}_0
 	nn = 0;
 	blasfeo_dveccp(nx[nn+1], &hsux[nn+1], nu[nn+1], &hspi[nn], 0);
+	// hspi[0] = p_{1}
+
 	blasfeo_dvecsc(nu[nn]+nx[nn], -1.0, &hsux[nn], 0);
+	// hsux[0] = [-l0]
+
 	blasfeo_dtrsv_ltn(nu[nn]+nx[nn], &hsL[nn], 0, 0, &hsux[nn], 0, &hsux[nn], 0);
+	// hsux[0] = [ u_0 = - \Sigma_0^{-1} * l_0 ]
+
 	blasfeo_dgemv_t(nu[nn]+nx[nn], nx[nn+1], 1.0, &hsBAbt[nn], 0, 0, &hsux[nn], 0, 1.0, &hsb[nn], 0, &hsux[nn+1], nu[nn+1]);
+	// hsux[1] = [l_{1}
+	//            x_{1} = B0*u0 + \tilde{b}0 ]   \tilde{b}0 = b0 + A0x0
+
 	blasfeo_dveccp(nx[nn+1], &hsux[nn+1], nu[nn+1], &hswork_vec[0], 0);
+	// hswork_vec[0] = x_{1}
+
 	blasfeo_dtrmv_ltn(nx[nn+1], nx[nn+1], &hsL[nn+1], nu[nn+1], nu[nn+1], &hswork_vec[0], 0, &hswork_vec[0], 0);
 	blasfeo_dtrmv_lnn(nx[nn+1], nx[nn+1], &hsL[nn+1], nu[nn+1], nu[nn+1], &hswork_vec[0], 0, &hswork_vec[0], 0);
+	// hswork_vec[0] = P_{1} * x_{1}
+
 	blasfeo_daxpy(nx[nn+1], 1.0, &hswork_vec[0], 0, &hspi[nn], 0, &hspi[nn], 0);
+	// hspi[0] = P_{1} * x_{1} + p_{1}
 
 	// middle stages
 	for(nn=1; nn<N; nn++)
 		{
+		// line 8, 9, 10 in Algorithm 2
+		// i = nn, i+1 = nn + 1
+
 		blasfeo_dveccp(nx[nn+1], &hsux[nn+1], nu[nn+1], &hspi[nn], 0);
+		// hspi[i] = p_{i+1}
+		// hsux[i+1] = [l_{i+1}
+		//				p_{i+1}] is still unchanged
+
 		blasfeo_dvecsc(nu[nn], -1.0, &hsux[nn], 0);
+		// hsux[i] = [-l_i
+		//			  x_i] from previous iteration xi is settled but the first nu elements are still li
+
 		blasfeo_dtrsv_ltn_mn(nu[nn]+nx[nn], nu[nn], &hsL[nn], 0, 0, &hsux[nn], 0, &hsux[nn], 0);
+		// hsL[i] = [\Sigma_i
+		//		 	 L_i'      \mathcal{L}_i] but here we abandon the \mathcal{L}_i part
+		// The inversion is [\Sigma_i  0
+		//		 	 		 L_i'      I]^{-1}
+		// 				   =[\Sigma_i^{-1}  	 0
+		// 					 -L_i'*\Sigma_i^{-1} I] and since there is a transpose in the inversion
+		// hsux[i] = [ u_i = -\Sigma_i^{-1} * L_i * x_i - \Sigma_i^{-1} * l_i
+		//			   x_i													 ]
+
 		blasfeo_dgemv_t(nu[nn]+nx[nn], nx[nn+1], 1.0, &hsBAbt[nn], 0, 0, &hsux[nn], 0, 1.0, &hsb[nn], 0, &hsux[nn+1], nu[nn+1]);
+		// hsux[i+1] = [l_{i+1}
+		//              x_{i+1} = Ai*xi + Bi*ui + bi]
+
 		blasfeo_dveccp(nx[nn+1], &hsux[nn+1], nu[nn+1], &hswork_vec[0], 0);
+		// hswork_vec[0] = x_{i+1}
+
 		blasfeo_dtrmv_ltn(nx[nn+1], nx[nn+1], &hsL[nn+1], nu[nn+1], nu[nn+1], &hswork_vec[0], 0, &hswork_vec[0], 0);
 		blasfeo_dtrmv_lnn(nx[nn+1], nx[nn+1], &hsL[nn+1], nu[nn+1], nu[nn+1], &hswork_vec[0], 0, &hswork_vec[0], 0);
-		blasfeo_daxpy(nx[nn+1], 1.0, &hswork_vec[0], 0, &hspi[nn], 0, &hspi[nn], 0);
+		// hswork_vec[0] = P_{i+1} * x_{i+1}
 
+		blasfeo_daxpy(nx[nn+1], 1.0, &hswork_vec[0], 0, &hspi[nn], 0, &hspi[nn], 0);
+		// hspi[i] = P_{i+1} * x_{i+1} + p_{i+1}
 		}
 
 	return;
